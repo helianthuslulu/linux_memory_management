@@ -1,0 +1,138 @@
+The analysis of the memory and I/O operations.
+linux设备驱动编程中的内存和I/O的分析。
+
+第一部分：linux内存布局分析和说明
+
+对于有MMU的X86处理器而言，linux提供的内存管理机制使得进程能够访问的内存空间达到了4GB。二者4GB又被人为的分为用户空间和内核
+空间。用户空间的可用地址范围是从0～3GB（即PAGE—_OFFSET，在0x86中等同于0xc0000000）,而3～4GB空间则是内核独有。
+
+内核空间中，从3G到vmalloc_start这段地址是物理内存映射区域（该区域中包含了内核镜像、物理页框表mem_map等等），比如我们使用的
+VMware虚拟系统内存是160M，那么3G～3G+160M这片内存就应该映射物理内存。在物理内存映射区之后，就是vmalloc区域。对于160M的系统
+而言，vmalloc_start位置应在3G+160M附近（在物理内存映射区与vmalloc_start期间还存在一个8M的gap来防止跃界），vmalloc_end的位置
+接近4G(最后位置系统会保留一片128k大小的区域用于专用页面映射)。
+
+kmalloc()和get_free_page()所申请的内存，不但逻辑上市连续的，映射到物理内存区中也是连续的，它们所申请的虚拟内存地址与实际的
+物理地址之间只有一个固定的偏移量，所以通过一个简单的转换就可以轻松的在物理内存和虚拟内存之间自由转换。内核提供了这样两个函
+数用来在由kmalloc()和get_free_page()所申请的内存的物理内存和虚拟内存之间转换：
+(1)virt_to_phys():实现内核虚拟地址向物理地址的转换；
+(2)phys_to_virt():实现内核物理地址向虚拟地址的转换。
+这两个函数的实现在/arch/x86/include/asm/io.h中：
+/**
+  *      virt_to_phys    -       map virtual addresses to physical
+  *      @address: address to remap
+  *
+  *      The returned physical address is the physical (CPU) mapping for
+  *      the memory address given. It is only valid to use this function on
+  *      addresses directly mapped or allocated via kmalloc.
+  *
+  *      This function does not give bus mappings for DMA transfers. In
+  *      almost all conceivable cases a device driver should not be using
+  *      this function
+  */
+ 
+ static inline phys_addr_t virt_to_phys(volatile void *address)
+ {
+         return __pa(address);
+ }
+ 
+ /**
+  *      phys_to_virt    -       map physical address to virtual
+  *      @address: address to remap
+  *
+  *      The returned virtual address is a current CPU mapping for
+  *      the memory address given. It is only valid to use this function on
+  *      addresses that have a kernel mapping
+  *
+  *      This function does not handle bus mappings for DMA transfers. In
+  *      almost all conceivable cases a device driver should not be using
+  *      this function
+  */
+ 
+ static inline void *phys_to_virt(phys_addr_t address)
+ {
+         return __va(address);
+ }
+ 
+ /*
+  * Change "struct page" to physical address.
+  */
+ #define page_to_phys(page)    ((dma_addr_t)page_to_pfn(page) << PAGE_SHIFT)
+ 
+ 而vmalloc申请的内存则处于vmalloc_start~vmalloc_end区间中，用它分配的虚拟地址空间和相应的物理内存空间之间的转换关系就比较
+ 复杂了。虽然用vmalloc()分配的虚拟地址空间是连续的，但是物理上并不要求连续。比如用下面一个例子测试一下kmalloc/get_free_page
+ /vmalloc的区别：
+#include <linux/module.h>
+#include <linux/slab.h>
+#include <linux/vmalloc.h>
+MODULE_LICENSE("GPL");
+unsigned char *pagemem;
+unsigned char *kmallocmem;
+unsigned char *vmallocmem;
+int __init mem_module_init(void)
+{
+  //最好每次内存申请都检查申请是否成功
+  //下面这段仅仅作为演示的代码没有检查
+  pagemem = (unsigned char*)get_free_page(0);
+  printk("<1>pagemem addr=%x", pagemem);
+  kmallocmem = (unsigned char*)kmalloc(100, 0);
+  printk("<1>kmallocmem addr=%x", kmallocmem);
+  vmallocmem = (unsigned char*)vmalloc(1000000);
+  printk("<1>vmallocmem addr=%x", vmallocmem);
+  return 0;
+}
+void __exit mem_module_exit(void)
+{
+  free_page(pagemem);
+  kfree(kmallocmem);
+  vfree(vmallocmem);
+}
+module_init(mem_module_init);
+module_exit(mem_module_exit);
+
+第二部分：linux设备驱动是如何访问外设的I/O端口(寄存器)
+几乎每一种外设都是通过读写设备上的寄存器来进行的，通常包括控制寄存器、状态寄存器和数据寄存器三大类，外设的寄存器通常被连
+续地编址。根据CPU体系结构的不同，CPU对IO端口的编址方式有两种：
+（1）I/O映射方式（I/O-mapped）
+典型地，如X86处理器为外设专门实现了一个单独的地址空间，称为“I/O地址空间”或者“I/O端口空间”，CPU通过专门的I/O指令（如X86的
+IN和OUT指令）来访问这一空间中的地址单元。
+（2）内存映射方式（Memory-mapped）
+RISC指令系统的CPU（如ARM、PowerPC等）通常只实现一个物理地址空间，外设I/O端口成为内存的一部分。此时，CPU可以象访问一个内存
+单元那样访问外设I/O端口，而不需要设立专门的外设I/O指令。
+但是，这两者在硬件实现上的差异对于软件来说是完全透明的，驱动程序开发人员可以将内存映射方式的I/O端口和外设内存统一看作是
+“I/O内存”资源。
+一般来说，在系统运行时，外设的I/O内存资源的物理地址是已知的，由硬件的设计决定。但是CPU通常并没有为这些已知的外设I/O内存
+资源的物理地址预定义虚拟地址范围，驱动程序并不能直接通过物理地址访问I/O内存资源，而必须将它们映射到核心虚地址空间内（通过
+页表），然后才能根据映射所得到的核心虚地址范围，通过访内指令访问这些I/O内存资源。Linux在(linux/io.h)头文件中声明了函数
+ioremap()，用来将I/O内存资源的物理地址映射到核心虚地址空间（3GB－4GB）中.具体的实现在mm/ioremap.c中：
+void __iomem *ioremap(unsigned long paddr, unsigned long size)
+  {
+          unsigned long end;
+  
+          /* Don't allow wraparound or zero size */
+          end = paddr + size - 1;
+          if (!size || (end < paddr))
+                  return NULL;
+  
+          /* If the region is h/w uncached, avoid MMU mappings */
+          if (paddr >= ARC_UNCACHED_ADDR_SPACE)
+                  return (void __iomem *)paddr;
+  
+          return ioremap_prot(paddr, size, PAGE_KERNEL_NO_CACHE);
+  }
+  EXPORT_SYMBOL(ioremap);
+  还有iounmap用来取消ioremap所做的映射：
+  void iounmap(const void __iomem *addr)
+  {
+          if (addr >= (void __force __iomem *)ARC_UNCACHED_ADDR_SPACE)
+                  return;
+  
+          vfree((void *)(PAGE_MASK & (unsigned long __force)addr));
+  }
+  EXPORT_SYMBOL(iounmap);
+  
+  在将I/O内存资源的物理地址映射成核心虚地址后，理论上讲我们就可以象读写RAM那样直接读写I/O内存资源了。为了保证驱动程序的跨
+  平台的可移植性，我们应该使用Linux中特定的函数来访问I/O内存资源，而不应该通过指向核心虚地址的指针来访问。
+  最后，特别强调驱动程序中mmap函数的实现方法。用mmap映射一个设备，意味着使用户空间的一段地址关联到设备内存上，这使得只要
+  程序在分配的地址范围内进行读取或者写入，实际上就是对设备的访问。
+  
+  原文出处：http://21cnbao.blog.51cto.com/109393/120087
