@@ -1,0 +1,28 @@
+1、写出ubuntu linux系统查看本机cpu和内存信息命令和用法及何解读些命令所列出结信息
+2、写出ubuntu linux 系统查看硬盘、显卡等信息命令和用法及何解读些命令所列出结信息
+查看CPU信息
+cat /proc/cpuinfo
+
+显示当前硬件信息
+sudo lshw
+
+获取CPU序列号或者主板序列号
+#CPU ID
+sudo dmidecode -t 4 | grep ID
+#Serial Number
+sudo dmidecode  | grep  Serial
+#CPU
+sudo dmidecode -t 4
+#BIOS
+sudo dmidecode -t 0
+#主板：
+sudo dmidecode -t 2
+#OEM:
+sudo dmidecode -t 11
+
+显示当前内存大小
+free -m |grep "Mem" | awk '{print $2}'
+
+查看硬盘温度
+sudo apt-get install hddtemp
+sudo hddtemp /dev/sda
